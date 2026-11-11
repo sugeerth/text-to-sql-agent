@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text-to-SQL Agent</title>
+<meta name="description" content="An interactive text-to-SQL CLI agent: schema-aware prompt, read-only guard, error-fed repair loop, and a result-set eval harness. 10/10 on a 10-question dev set at ~1s P50. Works with any OpenAI-compatible LLM.">
+<meta name="author" content="Sugeerth Murugesan">
+<style>
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --blue: #2a78d6; --blue-tint: #cde2fb; --orange: #eb6834;
+    --critical: #d03b3b; --good-text: #006300; --link: #1b5fae;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--page); color: var(--ink);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 27px; line-height: 1.25; }
+  h2 { font-size: 20px; margin: 48px 0 6px; }
+  h2 .n { color: var(--muted); font-weight: 600; margin-right: 6px; }
+  .sub { color: var(--ink-2); margin-bottom: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 10px; padding: 18px 20px; margin-top: 14px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+           gap: 12px; margin-top: 20px; }
+  .tile { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 10px; padding: 14px 16px; }
+  .tile .v { font-size: 30px; font-weight: 700; }
+  .tile .l { color: var(--ink-2); font-size: 13.5px; margin-top: 2px; }
+  .tile .c { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .ok { color: var(--good-text); }
+  svg { max-width: 100%; height: auto; display: block; }
+  .chartwrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin-top: 8px; }
+  th { text-align: left; color: var(--ink-2); font-weight: 600; }
+  th, td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--grid);
+           vertical-align: top; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 14px; }
+  code, pre { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: #f0efec; border-radius: 4px; padding: 1px 5px; }
+  pre { background: #f0efec; border-radius: 8px; padding: 14px 16px;
+        overflow-x: auto; margin-top: 10px; }
+  pre code { background: none; padding: 0; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-2);
+            font-size: 13.5px; margin: 8px 0 2px; align-items: center; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px;
+        margin-right: 6px; vertical-align: -1px; }
+  details { margin-top: 10px; }
+  summary { color: var(--muted); font-size: 13.5px; cursor: pointer; }
+  .note { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+  li { margin: 5px 0 5px 20px; }
+  .qa dt { font-weight: 600; margin-top: 12px; }
+  .qa dd { color: var(--ink-2); margin: 2px 0 0 0; }
+  a { color: var(--link); }
+  .eyebrow { font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em;
+             text-transform: uppercase; color: var(--link); margin-bottom: 10px; }
+  .links { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 4px; }
+  .links a { font-size: 14px; font-weight: 600; text-decoration: none; color: var(--link);
+             background: var(--blue-tint); border-radius: 6px; padding: 6px 12px; }
+  .links a:hover { text-decoration: underline; }
+</style>
+
+<style id="mobile">@media(max-width:600px){html,body{max-width:100%;overflow-wrap:anywhere}body *{min-width:0}pre{max-width:100%;overflow-x:auto;white-space:pre}table{display:block;max-width:100%;overflow-x:auto}img,svg,iframe,canvas{max-width:100%}input,select,textarea{max-width:100%}}</style>
+</head>
+<body>
+<main>
+
+<div class="eyebrow">Open source · LLM agents · August 2026</div>
+<h1>Text-to-SQL agent: how it works, and how it got to 10/10</h1>
+<p class="sub">An interactive CLI that turns plain-English questions into executed SQL on the
+Chinook sample database, on any OpenAI-compatible LLM. One design idea drives everything: <strong>the LLM
+does the reasoning, deterministic code does the safety and control.</strong></p>
+<div class="links"><a href="https://github.com/sugeerth/text-to-sql-agent">Code on GitHub &rarr;</a><a href="https://sugeerth.github.io/">sugeerth.github.io</a></div>
+
+<div class="tiles">
+  <div class="tile"><div class="v ok">10/10</div><div class="l">dev-set accuracy, stable across two runs</div><div class="c">naive one-line prompt: 2/10</div></div>
+  <div class="tile"><div class="v ok">0.9–1.3s</div><div class="l">P50 latency, end-to-end</div><div class="c">target &lt;3s for an interactive CLI</div></div>
+  <div class="tile"><div class="v ok">~2k</div><div class="l">tokens per question (1,935 in + 55 out)</div><div class="c">one model call on the happy path</div></div>
+  <div class="tile"><div class="v ok">1 attempt</div><div class="l">per question in the final runs</div><div class="c">the repair loop exists but wasn't needed</div></div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">1</span>How a question becomes an answer</h2>
+<p class="sub">Blue boxes are the LLM (reasoning). Gray boxes are plain Python (guaranteed behavior).
+Hover any box for what it does.</p>
+
+<div class="card chartwrap">
+<svg viewBox="0 0 840 300" role="img" aria-label="Pipeline diagram: question to prompt to LLM to guard to execute to answer, with an error repair loop back to the LLM">
+  <defs>
+    <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#52514e"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#d03b3b"/>
+    </marker>
+  </defs>
+  <!-- row 1 boxes -->
+  <g font-family="system-ui" font-size="12.5">
+    <rect x="8"   y="96" width="96"  height="58" rx="8" fill="#fcfcfb" stroke="#c3c2b7"/>
+    <text x="56"  y="120" text-anchor="middle" fill="#0b0b0b" font-weight="600">You ask</text>
+    <text x="56"  y="137" text-anchor="middle" fill="#52514e" font-size="11.5">"top 5 genres?"</text>
+
+    <rect x="132" y="88" width="130" height="74" rx="8" fill="#f0efec" stroke="#c3c2b7"><title>src/prompts.py — build_system_prompt(): schema, foreign keys, 3 sample rows per table, output rules. Built once, cached.</title></rect>
+    <text x="197" y="112" text-anchor="middle" fill="#0b0b0b" font-weight="600">1 · Build prompt</text>
+    <text x="197" y="129" text-anchor="middle" fill="#52514e" font-size="11.5">schema + FK map</text>
+    <text x="197" y="144" text-anchor="middle" fill="#52514e" font-size="11.5">+ samples + history</text>
+
+    <rect x="290" y="88" width="120" height="74" rx="8" fill="#cde2fb" stroke="#2a78d6"><title>src/agent.py — _generate(): one chat completion, temperature 0, reasoning off. The only network call on the happy path.</title></rect>
+    <text x="350" y="112" text-anchor="middle" fill="#0b0b0b" font-weight="600">2 · LLM writes SQL</text>
+    <text x="350" y="129" text-anchor="middle" fill="#52514e" font-size="11.5">DeepSeek V4 Flash</text>
+    <text x="350" y="144" text-anchor="middle" fill="#52514e" font-size="11.5">1 call · ~1s</text>
+
+    <rect x="438" y="88" width="118" height="74" rx="8" fill="#f0efec" stroke="#c3c2b7"><title>src/agent.py — _guard(): strips comments, requires exactly one statement, first keyword SELECT or WITH. Rejects before anything touches the database.</title></rect>
+    <text x="497" y="112" text-anchor="middle" fill="#0b0b0b" font-weight="600">3 · Guard</text>
+    <text x="497" y="129" text-anchor="middle" fill="#52514e" font-size="11.5">read-only whitelist</text>
+    <text x="497" y="144" text-anchor="middle" fill="#52514e" font-size="11.5">single statement</text>
+
+    <rect x="584" y="88" width="118" height="74" rx="8" fill="#f0efec" stroke="#c3c2b7"><title>src/db.py — query() on a connection opened with mode=ro: even if the guard missed something, SQLite itself refuses writes.</title></rect>
+    <text x="643" y="112" text-anchor="middle" fill="#0b0b0b" font-weight="600">4 · Execute</text>
+    <text x="643" y="129" text-anchor="middle" fill="#52514e" font-size="11.5">read-only</text>
+    <text x="643" y="144" text-anchor="middle" fill="#52514e" font-size="11.5">connection</text>
+
+    <rect x="730" y="96" width="102" height="58" rx="8" fill="#fcfcfb" stroke="#c3c2b7"/>
+    <text x="781" y="120" text-anchor="middle" fill="#0b0b0b" font-weight="600">5 · Answer</text>
+    <text x="781" y="137" text-anchor="middle" fill="#52514e" font-size="11.5">SQL + rows + time</text>
+
+    <!-- forward arrows -->
+    <line x1="104" y1="125" x2="126" y2="125" stroke="#52514e" stroke-width="1.6" marker-end="url(#arr)"/>
+    <line x1="262" y1="125" x2="284" y2="125" stroke="#52514e" stroke-width="1.6" marker-end="url(#arr)"/>
+    <line x1="410" y1="125" x2="432" y2="125" stroke="#52514e" stroke-width="1.6" marker-end="url(#arr)"/>
+    <line x1="556" y1="125" x2="578" y2="125" stroke="#52514e" stroke-width="1.6" marker-end="url(#arr)"/>
+    <line x1="702" y1="125" x2="724" y2="125" stroke="#52514e" stroke-width="1.6" marker-end="url(#arr)"/>
+
+    <!-- repair loop -->
+    <path d="M 497 162 L 497 216 L 350 216 L 350 168" fill="none" stroke="#d03b3b" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrR)"/>
+    <path d="M 643 162 L 643 216 L 500 216" fill="none" stroke="#d03b3b" stroke-width="1.6" stroke-dasharray="5 4"/>
+    <text x="497" y="238" text-anchor="middle" fill="#d03b3b" font-size="12">⟲ on rejection or SQLite error: the exact error text goes back to the LLM — max 2 repairs, then fail honestly</text>
+
+    <!-- responsibility bands -->
+    <text x="350" y="72" text-anchor="middle" fill="#2a78d6" font-size="12" font-weight="600">LLM — reasoning</text>
+    <text x="570" y="72" text-anchor="middle" fill="#898781" font-size="12" font-weight="600">code — guarantees</text>
+
+    <!-- follow-up note -->
+    <text x="420" y="272" text-anchor="middle" fill="#898781" font-size="12">Follow-ups: the final SQL and a 3-row result preview join the conversation history,</text>
+    <text x="420" y="289" text-anchor="middle" fill="#898781" font-size="12">so "now only for Brazil" refines the last query. Repair chatter never enters history.</text>
+  </g>
+</svg>
+</div>
+
+<div class="card">
+<table aria-label="Who does what">
+  <tr><th>The LLM decides</th><th>Plain code guarantees</th></tr>
+  <tr><td>What the question means</td><td>Only SELECT/WITH ever runs (whitelist + read-only connection)</td></tr>
+  <tr><td>Which tables and joins to use</td><td>Exactly one statement, comments stripped</td></tr>
+  <tr><td>The SQL itself</td><td>Retry limit (2), request timeout (25s), token cap (600)</td></tr>
+  <tr><td>How to fix SQL given the real error</td><td>Execution, timing, history size, rendering</td></tr>
+</table>
+<p class="note">Why not a tool-calling agent? Same observe-and-repair behavior, but every question would cost 2–3 model
+round-trips (~3–5s) instead of one (~1s) — and an interactive CLI needs answers in under ~3s. The four stages above
+<em>are</em> the tool boundaries: flipping stage 4 into a model-invoked tool for large schemas is a ~20-line change.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">2</span>The code, file by file</h2>
+<p class="sub">Six small files, about 600 lines in total. Only <code>agent.py</code> talks to the model.</p>
+
+<div class="card">
+<table>
+  <tr><th>File</th><th>Job</th><th>The one thing to know</th></tr>
+  <tr><td><code>src/prompts.py</code></td><td>System prompt + schema context</td><td><code>build_schema_context()</code> renders columns, FK arrows, and 3 sample rows per table (~1.3k tokens). Sample rows are what teach the model that dates are TEXT.</td></tr>
+  <tr><td><code>src/agent.py</code></td><td>The agent loop</td><td><code>SqlAgent.ask()</code> below — the whole system in 20 lines. Only file that talks to the API.</td></tr>
+  <tr><td><code>src/cli.py</code></td><td>Terminal UX</td><td>REPL: shows SQL, result table, timing; <code>/schema</code>, <code>/reset</code>, <code>/help</code>. No LLM logic.</td></tr>
+  <tr><td><code>src/eval.py</code></td><td>Grader</td><td>Executes generated SQL, compares <em>result sets</em>, writes <code>dev_answers.json</code>, prints P50/P90 + tokens.</td></tr>
+  <tr><td><code>src/db.py</code></td><td>SQLite helpers</td><td>Read-only connections, queries, schema introspection. Refuses to open a missing file instead of silently creating an empty one.</td></tr>
+  <tr><td><code>src/setup_db.py</code></td><td>Data</td><td>Downloads the public Chinook sample database: <code>uv run setup-db</code>.</td></tr>
+</table>
+
+<pre><code># src/agent.py — ask(), simplified
+messages = [system_prompt] + history + [question]
+for attempt in range(1 + max_repairs):          # 1 try + 2 repairs
+    sql   = extract_sql(llm(messages))          # ```sql fence -> string
+    error = guard(sql)                          # None if SELECT/WITH, single stmt
+    if error is None:
+        try:
+            return execute(sql)                 # read-only connection
+        except sqlite3.Error as e:
+            error = str(e)                      # the model gets the real error
+    messages += [assistant(sql),
+                 user(f"That query failed: {error}. Return a corrected query.")]
+return failure(error)                           # never pretend it worked</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">3</span>How results are graded — and why the grader is trusted</h2>
+<div class="card">
+<ul>
+  <li><strong>Execute, then compare results — never compare SQL text.</strong> Different valid queries can produce the same correct answer.</li>
+  <li><strong>Rows are compared as an unordered multiset</strong>, ignoring column names, floats rounded to 2dp. Reason: the gold answers contain rank <em>ties</em> (q_008, q_009) and two different playlists both named "Music" (q_006) — ordered or name-strict comparison would fail correct answers.</li>
+  <li><strong>The grader graded itself first:</strong> <code>--self-test</code> runs the <em>gold</em> SQL through the same pipeline — 10/10, so harness bugs can't masquerade as model quality.</li>
+  <li><strong>The baseline ran through the same harness:</strong> a naive one-line prompt (<em>“Convert this question to SQL”</em>) scores 2/10 — it invents tables (<code>orders</code>, <code>transactions</code>, <code>albums</code>) that don't exist.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">4</span>Three fixes took accuracy from 2/10 to a stable 10/10</h2>
+<p class="sub">Every run is the same 10 questions through the full harness. Hover bars for details.</p>
+
+<div class="card chartwrap">
+<div class="legend">
+  <span><span class="sw" style="background:#eb6834"></span>naive baseline prompt</span>
+  <span><span class="sw" style="background:#2a78d6"></span>the agent, as the prompt & config evolved</span>
+</div>
+<svg viewBox="0 0 800 300" role="img" aria-label="Bar chart of accuracy per evaluation run, from 2 out of 10 at baseline to 10 out of 10 in the final two runs">
+  <g font-family="system-ui" font-size="12">
+    <!-- gridlines + y labels -->
+    <line x1="46" y1="40"  x2="784" y2="40"  stroke="#e1e0d9"/><text x="38" y="44"  text-anchor="end" fill="#898781">10</text>
+    <line x1="46" y1="120" x2="784" y2="120" stroke="#e1e0d9"/><text x="38" y="124" text-anchor="end" fill="#898781">5</text>
+    <line x1="46" y1="200" x2="784" y2="200" stroke="#c3c2b7"/><text x="38" y="204" text-anchor="end" fill="#898781">0</text>
+    <!-- bars: x step 92, width 40; h = v*16; y = 200 - h -->
+    <rect x="66"  y="168" width="40" height="32"  rx="4" fill="#eb6834"><title>Baseline — naive one-line prompt, no schema: 2/10. Seven answers used hallucinated table names.</title></rect>
+    <rect x="158" y="72"  width="40" height="128" rx="4" fill="#2a78d6"><title>Run 1 — schema-aware agent, first try: 8/10, but P50 latency 8.9s. Hidden "reasoning" tokens caused huge delays and one empty answer.</title></rect>
+    <rect x="250" y="88"  width="40" height="112" rx="4" fill="#2a78d6"><title>Run 2 — reasoning disabled: latency fixed (P50 1.3s), 7/10. New failure class visible: extra id columns in output.</title></rect>
+    <rect x="342" y="104" width="40" height="96"  rx="4" fill="#2a78d6"><title>Run 3 — first "no ids" rule: 6/10. The rule overcorrected — names came out split where gold concatenates.</title></rect>
+    <rect x="434" y="56"  width="40" height="144" rx="4" fill="#2a78d6"><title>Run 4 — output conventions with a worked example: 9/10. The one failure was a 76s server timeout, not wrong SQL.</title></rect>
+    <rect x="526" y="72"  width="40" height="128" rx="4" fill="#2a78d6"><title>Run 5 — same prompt, rerun: 8/10. Temperature 0 is not bit-deterministic across serverless replicas; presentation flipped on two questions.</title></rect>
+    <rect x="618" y="40"  width="40" height="160" rx="4" fill="#2a78d6"><title>Run 6 — final rule: listings keep raw columns, per-person aggregations use one name column, never ids: 10/10.</title></rect>
+    <rect x="710" y="40"  width="40" height="160" rx="4" fill="#2a78d6"><title>Run 7 — stability rerun, same everything: 10/10 again. P50 0.86s.</title></rect>
+    <!-- selective value labels -->
+    <text x="86"  y="160" text-anchor="middle" fill="#0b0b0b" font-weight="600">2</text>
+    <text x="362" y="96"  text-anchor="middle" fill="#0b0b0b" font-weight="600">6</text>
+    <text x="638" y="32"  text-anchor="middle" fill="#0b0b0b" font-weight="600">10</text>
+    <text x="730" y="32"  text-anchor="middle" fill="#0b0b0b" font-weight="600">10</text>
+    <!-- x labels -->
+    <text x="86"  y="220" text-anchor="middle" fill="#52514e">baseline</text>
+    <text x="178" y="220" text-anchor="middle" fill="#52514e">run 1</text>
+    <text x="270" y="220" text-anchor="middle" fill="#52514e">run 2</text>
+    <text x="362" y="220" text-anchor="middle" fill="#52514e">run 3</text>
+    <text x="454" y="220" text-anchor="middle" fill="#52514e">run 4</text>
+    <text x="546" y="220" text-anchor="middle" fill="#52514e">run 5</text>
+    <text x="638" y="220" text-anchor="middle" fill="#52514e">run 6</text>
+    <text x="730" y="220" text-anchor="middle" fill="#52514e">run 7</text>
+    <!-- fix annotations -->
+    <text x="270" y="248" text-anchor="middle" fill="#898781" font-size="11.5">fix 1: reasoning off</text>
+    <text x="270" y="262" text-anchor="middle" fill="#898781" font-size="11.5">(P50 8.9s → 1.3s)</text>
+    <text x="454" y="248" text-anchor="middle" fill="#898781" font-size="11.5">fix 2: output conventions</text>
+    <text x="454" y="262" text-anchor="middle" fill="#898781" font-size="11.5">(no id columns + example)</text>
+    <text x="638" y="248" text-anchor="middle" fill="#898781" font-size="11.5">fix 3: listing vs aggregation</text>
+    <text x="638" y="262" text-anchor="middle" fill="#898781" font-size="11.5">(name-column rule)</text>
+  </g>
+</svg>
+<details><summary>data table</summary>
+<table>
+<tr><th>Run</th><th>What changed</th><th class="num">Accuracy</th><th class="num">P50</th><th>Failures &amp; cause</th></tr>
+<tr><td>baseline</td><td>naive one-line prompt, no schema</td><td class="num">2/10</td><td class="num">1.1s</td><td>7× hallucinated tables, 1× wrong grouping</td></tr>
+<tr><td>run 1</td><td>schema-aware agent, first version</td><td class="num">8/10</td><td class="num">8.9s</td><td>reasoning starved q_005's token budget (empty SQL ×3 attempts); q_006 timed out at 40s</td></tr>
+<tr><td>run 2</td><td>reasoning disabled</td><td class="num">7/10</td><td class="num">1.3s</td><td>q_005, q_006: extra id column; q_008: server timeout</td></tr>
+<tr><td>run 3</td><td>"no ids" rule v1; 10s timeout</td><td class="num">6/10</td><td class="num">1.2s</td><td>names split vs gold's concatenation (q_005, q_009); q_006 id remained; q_008 timeout</td></tr>
+<tr><td>run 4</td><td>conventions + worked example; 25s timeout</td><td class="num">9/10</td><td class="num">2.1s</td><td>q_003: 76s server timeout (infrastructure, not SQL)</td></tr>
+<tr><td>run 5</td><td>same prompt, rerun</td><td class="num">8/10</td><td class="num">0.9s</td><td>replica nondeterminism flipped presentation on q_003, q_009</td></tr>
+<tr><td>run 6</td><td>listing-vs-aggregation name rule</td><td class="num">10/10</td><td class="num">1.3s</td><td>—</td></tr>
+<tr><td>run 7</td><td>stability rerun</td><td class="num">10/10</td><td class="num">0.9s</td><td>—</td></tr>
+</table></details>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">5</span>Retries: two layers, and what actually triggered them</h2>
+<p class="sub">In the final configuration every question passed on its first attempt — the safety nets
+exist but weren't needed. Here is every retry observed on the way there, and its cause.</p>
+
+<div class="card">
+<table>
+  <tr><th>Layer</th><th>Trigger</th><th>What happens</th><th>Cap</th></tr>
+  <tr><td><strong>Repair loop</strong> (agent)</td><td>guard rejection or SQLite error</td><td>the exact error text goes back to the model: <em>"That query failed: no such column X. Return a corrected query."</em></td><td>2 repairs</td></tr>
+  <tr><td><strong>HTTP retry</strong> (client)</td><td>request timeout / transient network</td><td>same request re-sent by the OpenAI client</td><td>2 retries, 25s each</td></tr>
+</table>
+
+<table style="margin-top:18px">
+  <tr><th>When</th><th>Question</th><th class="num">Attempts</th><th>Cause</th><th>Outcome / fix</th></tr>
+  <tr><td>run 1</td><td>q_001</td><td class="num">2</td><td>first SQL had an execution error; model saw it</td><td>✅ repaired itself on attempt 2 — the loop working as designed</td></tr>
+  <tr><td>run 1</td><td>q_009</td><td class="num">2</td><td>same — execution error, then self-repair</td><td>✅ repaired on attempt 2</td></tr>
+  <tr><td>run 1</td><td>q_005</td><td class="num">3</td><td>hidden reasoning consumed the whole 600-token budget → the visible answer was <em>empty</em>, three times</td><td>❌ failed → root fix: <code>reasoning_effort: "none"</code> (fix 1)</td></tr>
+  <tr><td>runs 1–4</td><td>q_006 / q_008 / q_003</td><td class="num">—</td><td>serverless cold-replica spikes: the same request that usually takes ~1s occasionally took 25–76s and exhausted HTTP retries</td><td>❌ 4 timeouts across 4 runs → 25s timeout + retries; residual tail risk documented</td></tr>
+  <tr><td>runs 6–7</td><td>all 20 question-runs</td><td class="num">1</td><td>—</td><td>✅ no retries needed anywhere</td></tr>
+</table>
+<p class="note">Reading the pattern: the repair loop catches <em>SQL</em> mistakes (2 saves in run 1); it cannot catch
+<em>presentation</em> mismatches (query runs fine, columns shaped differently than expected) — those needed prompt
+rules — nor <em>infrastructure</em> spikes, which needed timeout policy. Three failure classes, three different tools.</p>
+</div>
+
+<div class="card chartwrap">
+<div class="legend">
+  <span><span class="sw" style="background:#eb6834"></span>baseline prompt's failures</span>
+  <span><span class="sw" style="background:#2a78d6"></span>agent-side failures during development</span>
+</div>
+<svg viewBox="0 0 800 216" role="img" aria-label="Horizontal bar chart of failure causes: hallucinated tables 7, presentation variance 7, serverless timeouts 4, reasoning starvation 1">
+  <g font-family="system-ui" font-size="12.5">
+    <!-- rows: y step 46; bar h 20; scale 56px per unit -->
+    <text x="240" y="34"  text-anchor="end" fill="#0b0b0b">hallucinated tables / columns</text>
+    <rect x="252" y="20"  width="392" height="20" rx="4" fill="#eb6834"><title>7 of the baseline prompt's 8 failures: with no schema in the prompt, the model invented tables like orders, transactions, albums. Fixed by schema-aware prompting — zero occurrences in any agent run.</title></rect>
+    <text x="652" y="34"  fill="#0b0b0b" font-weight="600">7</text>
+
+    <text x="240" y="80"  text-anchor="end" fill="#0b0b0b">presentation variance</text>
+    <rect x="252" y="66"  width="392" height="20" rx="4" fill="#2a78d6"><title>7 failures across runs 2–5: correct data, wrong column shape (extra id columns; split vs concatenated names). Fixed by output conventions in the prompt (fixes 2 and 3).</title></rect>
+    <text x="652" y="80"  fill="#0b0b0b" font-weight="600">7</text>
+
+    <text x="240" y="126" text-anchor="end" fill="#0b0b0b">serverless timeout spikes</text>
+    <rect x="252" y="112" width="224" height="20" rx="4" fill="#2a78d6"><title>4 failures across runs 1–4: cold-replica latency spikes (25–76s) on requests that normally take ~1s. Mitigated by a 25s timeout with retries; the long tail is a documented known issue.</title></rect>
+    <text x="484" y="126" fill="#0b0b0b" font-weight="600">4</text>
+
+    <text x="240" y="172" text-anchor="end" fill="#0b0b0b">reasoning starved the output</text>
+    <rect x="252" y="158" width="56"  height="20" rx="4" fill="#2a78d6"><title>1 failure in run 1: the model's hidden thinking used up the 600-token budget, leaving an empty visible answer. Fixed by disabling reasoning — which also cut P50 from 8.9s to 1.3s.</title></rect>
+    <text x="316" y="172" fill="#0b0b0b" font-weight="600">1</text>
+  </g>
+</svg>
+<p class="note">Wrong-but-executing SQL — the scariest class for a tool people trust with their data — appeared <strong>zero</strong> times
+in agent runs: every agent failure was either visible (timeout, empty) or a column-shape mismatch with correct data.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">6</span>Latency: the P50 story is excellent; the tail is honest</h2>
+<p class="sub">Per-question end-to-end times for the first 10/10 run (run 6). Hover the dots.</p>
+
+<div class="card chartwrap">
+<svg viewBox="0 0 800 150" role="img" aria-label="Dot plot of per-question latency in run 6: nine questions between 0.9 and 3.5 seconds, one outlier at 13.9 seconds; the 3 second target is marked">
+  <g font-family="system-ui" font-size="12">
+    <!-- axis 0..14s mapped to x 60..760: x = 60 + s*50 -->
+    <line x1="60" y1="84" x2="760" y2="84" stroke="#c3c2b7"/>
+    <text x="60"  y="104" text-anchor="middle" fill="#898781">0s</text>
+    <text x="310" y="104" text-anchor="middle" fill="#898781">5s</text>
+    <text x="560" y="104" text-anchor="middle" fill="#898781">10s</text>
+    <text x="760" y="104" text-anchor="middle" fill="#898781">14s</text>
+    <line x1="210" y1="34" x2="210" y2="92" stroke="#d03b3b" stroke-dasharray="4 4"/>
+    <text x="210" y="24" text-anchor="middle" fill="#d03b3b">3s target</text>
+    <!-- dots r=5: values 2.13 .97 .95 1.25 3.14 13.90 1.28 3.49 1.28 1.31 -->
+    <circle cx="166" cy="66" r="5" fill="#2a78d6"><title>q_001 — 2.13s</title></circle>
+    <circle cx="108" cy="66" r="5" fill="#2a78d6"><title>q_002 — 0.97s</title></circle>
+    <circle cx="107" cy="78" r="5" fill="#2a78d6"><title>q_003 — 0.95s</title></circle>
+    <circle cx="122" cy="54" r="5" fill="#2a78d6"><title>q_004 — 1.25s</title></circle>
+    <circle cx="217" cy="66" r="5" fill="#2a78d6"><title>q_005 — 3.14s</title></circle>
+    <circle cx="755" cy="66" r="5" fill="#2a78d6"><title>q_006 — 13.90s: a cold-replica spike, not a hard question. The identical request took 0.82s in run 7.</title></circle>
+    <circle cx="124" cy="66" r="5" fill="#2a78d6"><title>q_007 — 1.28s</title></circle>
+    <circle cx="234" cy="66" r="5" fill="#2a78d6"><title>q_008 — 3.49s</title></circle>
+    <circle cx="124" cy="42" r="5" fill="#2a78d6"><title>q_009 — 1.28s</title></circle>
+    <circle cx="125" cy="90" r="5" fill="#2a78d6"><title>q_010 — 1.31s</title></circle>
+    <text x="700" y="46" text-anchor="middle" fill="#52514e" font-size="11.5">q_006: 13.9s cold spike</text>
+    <text x="700" y="60" text-anchor="middle" fill="#52514e" font-size="11.5">(same request: 0.8s in run 7)</text>
+  </g>
+</svg>
+<table>
+  <tr><th>Configuration</th><th class="num">P50</th><th class="num">P90</th><th class="num">max</th><th class="num">Accuracy</th></tr>
+  <tr><td>DeepSeek V4 Flash — run 6</td><td class="num">1.30s</td><td class="num">13.9s</td><td class="num">13.9s</td><td class="num">10/10</td></tr>
+  <tr><td>DeepSeek V4 Flash — run 7</td><td class="num">0.86s</td><td class="num">1.34s</td><td class="num">1.34s</td><td class="num">10/10</td></tr>
+  <tr><td>Nemotron Lightning 30B (A/B)</td><td class="num">0.31s</td><td class="num">3.94s</td><td class="num">3.94s</td><td class="num">10/10</td></tr>
+</table>
+<p class="note">The honest read: warm-path latency beats the 3s target by 2–10×, but roughly one request per run hits a
+serverless cold-replica spike. Production mitigations, in order: streaming (perceived latency), a dedicated deployment
+(no cold replicas), and a latency-budget retry policy.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="n">7</span>Cost: what one question consumes</h2>
+<p class="sub">Measured usage per question in the final runs: one call, and almost all of it is prompt.</p>
+
+<div class="card chartwrap">
+<svg viewBox="0 0 800 120" role="img" aria-label="Stacked bar of tokens per question: 1,935 input tokens and 55 output tokens">
+  <g font-family="system-ui" font-size="12.5">
+    <!-- scale: 700px for 1,990 tokens: 1935 -> 681, 55 -> 19; x0 = 50 -->
+    <rect x="50" y="30" width="681" height="26" rx="4" fill="#cde2fb" stroke="#2a78d6"><title>1,935 input tokens: output rules, schema with FK map, 3 sample rows per table, conversation history, and the question</title></rect>
+    <rect x="733" y="30" width="19" height="26" rx="4" fill="#2a78d6"><title>55 output tokens: one SQL query in a fence</title></rect>
+    <text x="62" y="48" fill="#0b0b0b" font-weight="600">1,935 input tokens: rules, schema, sample rows, history, question</text>
+    <text x="752" y="78" text-anchor="end" fill="#0b0b0b" font-weight="600">55 output</text>
+    <text x="50" y="104" fill="#52514e">per 1M questions: about 1.94B input + 55M output tokens</text>
+  </g>
+</svg>
+<p class="note">Two levers follow directly. The system prompt (rules, schema, sample rows) is identical on every
+request and is nearly all of the input, so providers with prompt caching discount most of it. And since a small
+open model (Nemotron Lightning 30B) also scored 10/10 here at P50 0.31s, routing small-by-default and
+large-for-complex-schemas is a real lever, not a hope.</p>
+</div>
+
+<p class="note" style="margin-top:36px"><strong>Sugeerth Murugesan</strong> · Text-to-SQL Agent · August 2026.
+Source (<code>src/</code>, six files), the 10 questions, and <code>dev_answers.json</code> from a 10/10 run are on
+<a href="https://github.com/sugeerth/text-to-sql-agent">GitHub</a>. Built with Claude (Anthropic) as a coding assistant. Chinook sample database by
+<a href="https://github.com/lerocha/chinook-database">Luis Rocha</a>.</p>
+
+</main>
+</body>
+</html>

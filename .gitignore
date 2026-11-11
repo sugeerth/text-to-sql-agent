@@ -1,0 +1,16 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.key
+
+# downloaded data
+data/Chinook.db
+data/*.partial
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+.DS_Store
